@@ -1,0 +1,50 @@
+name: Sync Mesa upstream
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Upstream ref (branch or tag)
+        required: true
+        default: staging/26.3
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone upstream Mesa
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          UPSTREAM="https://gitlab.freedesktop.org/mesa/mesa.git"
+          git clone --depth=1 --single-branch --branch "$REF" "$UPSTREAM" mesa
+          echo "VERSION=$(cat mesa/VERSION)"
+          echo "UPSTREAM_HEAD=$(git -C mesa rev-parse HEAD)"
+          test -d mesa/src/panfrost
+
+      - name: Publish tree to this repository
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          cd mesa
+          UPSTREAM_HEAD=$(git rev-parse HEAD)
+          VERSION=$(cat VERSION)
+          rm -rf .github
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan publish
+          git add -A
+          git commit -m "mesa: import ${REF} (${VERSION})" -m "Upstream: https://gitlab.freedesktop.org/mesa/mesa.git" -m "Upstream commit: ${UPSTREAM_HEAD}"
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "https://x-access-token:${TOKEN}@github.com/TheoLore/panvk.git"
+          git push -f origin publish:main
+
+      - name: Summary
+        run: |
+          echo "Synced upstream Mesa ref '${{ inputs.ref }}' onto TheoLore/panvk main"

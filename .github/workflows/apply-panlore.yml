@@ -1,0 +1,48 @@
+name: Apply PanLore identity
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply driver identity
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path("src/panfrost/vulkan/panvk_vX_physical_device.c")
+          t = p.read_text()
+          old = (
+              '   snprintf(properties->driverName, VK_MAX_DRIVER_NAME_SIZE, "panvk");\n'
+              '   snprintf(properties->driverInfo, VK_MAX_DRIVER_INFO_SIZE,\n'
+              '            "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);'
+          )
+          new = (
+              '   snprintf(properties->driverName, VK_MAX_DRIVER_NAME_SIZE, "PanLore");\n'
+              '   snprintf(properties->driverInfo, VK_MAX_DRIVER_INFO_SIZE,\n'
+              '            "PanLore (Mesa " PACKAGE_VERSION MESA_GIT_SHA1 ")");'
+          )
+          if old not in t:
+              if '"PanLore"' in t:
+                  print("already PanLore")
+                  raise SystemExit(0)
+              raise SystemExit("pattern not found — aborting without changes")
+          p.write_text(t.replace(old, new, 1))
+          print("PanLore identity applied")
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/panfrost/vulkan/panvk_vX_physical_device.c
+          if git diff --cached --quiet; then
+            echo "no changes"
+            exit 0
+          fi
+          git commit -m "panvk: report PanLore in driverName and driverInfo"
+          git push origin HEAD:main
