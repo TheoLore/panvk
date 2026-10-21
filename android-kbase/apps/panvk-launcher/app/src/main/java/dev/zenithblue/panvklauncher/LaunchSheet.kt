@@ -1,0 +1,228 @@
+package dev.zenithblue.panvklauncher
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+/**
+ * "Launch" card shown before a game starts. Lists every runtime part with its real installed version
+ * (read-only) and lets the user change resolution, FPS limit, driver, FEX mode and audio driver; all are saved on the game.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun LaunchSheet(
+    game: Shortcut,
+    drivers: List<Driver>,
+    activeDriver: Driver,
+    defaultResolution: String,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onLaunch: (Shortcut) -> Unit
+) {
+    val ctx = LocalContext.current
+    var ctlRev by remember { mutableStateOf(0) }
+    var editCtl by remember { mutableStateOf(false) }
+    val info = remember(game.id, game.exe, game.arch, ctlRev) { LaunchInfoResolver.resolve(ctx, game) }
+    if (editCtl) GameControllerEditor(game.id, game.name, info.exePath) { editCtl = false; ctlRev++ }
+    var resolution by remember(game.id) { mutableStateOf(game.resolution) }
+    var fps by remember(game.id) { mutableStateOf(game.fpsLimit) }
+    // Driver ids can be legacy ("bundled") or point at a deleted driver: show those as "default".
+    var driverId by remember(game.id) {
+        mutableStateOf(DriverManager.find(ctx, drivers, game.driver)?.id ?: "")
+    }
+    var fexMode by remember(game.id) { mutableStateOf(Box64Presets.resolve(Box64Presets.modeFor(game))) }
+    var audio by remember(game.id) { mutableStateOf(game.audio) }
+    var renderApi by remember(game.id) { mutableStateOf(RenderApi.norm(game.renderApi)) }
+    // PE import scan + engine hint (Godot/Unity/Unreal) off the main thread; the exe can be tens of MB.
+    val detected by produceState<RenderApi.Detected?>(null, info.exePath) {
+        value = withContext(Dispatchers.IO) { RenderApi.detect(info.exePath) }
+    }
+    val mesaOk = remember { ContentManager.current(ctx, RenderApi.MESA_TYPE) != null }
+    val vkd3dOk = remember { ContentManager.current(ctx, "VKD3D") != null }
+    val apiWarn = detected?.let { RenderApi.warning(renderApi, it, mesaOk, vkd3dOk) }
+    val audioDefault = remember { GameAudio.defaultDriver(ctx) }
+    val audioInfo = remember(audio) { GameAudio.describe(ctx, GameAudio.resolve(ctx, audio)) }
+    // Box64 (WowBox64) only emulates 32-bit WoW64 processes; 64-bit games always use FEX.
+    val is32 = info.arch == "i386"
+    val box = is32 && Box64Presets.isBox(fexMode)
+    val emuMode = if (!is32 && Box64Presets.isBox(fexMode)) FexPresets.DEFAULT else fexMode
+    val chosenDriver = if (driverId.isEmpty()) activeDriver else drivers.firstOrNull { it.id == driverId } ?: activeDriver
+
+    val problems = buildList {
+        info.missing.forEach { add("${it.label} is not installed. Install it in Components.") }
+        if (!info.exeExists) add("Executable not found on this device.")
+        if (busy) add("Wine is already running. Stop it first.")
+        if (info.arch == "i386") ContainerManager.wow64Problem(ctx)?.let { add(it) }
+    }
+
+    // Default M3 sheet caps at 640dp; landscape gets a wider two-column sheet so Launch stays on screen.
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        sheetMaxWidth = 960.dp
+    ) {
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val wide = maxWidth >= 640.dp
+            val header: @Composable () -> Unit = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    GameIcon(game, size = 56)
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Launch", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                        Text(game.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+            val runtime: @Composable () -> Unit = {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                        Row(Modifier.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.Lock, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Runtime (read-only)", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        val dxvk = info.dxvk.copy(version = info.dxvk.version + if (info.dxvkEnabled) " · on" else " · off")
+                        listOf(info.rootfs, info.wine, info.fex, dxvk, info.controller).forEach { r ->
+                            InfoRow(r.label, r.name, r.version, subIsError = r.missing)
+                        }
+                        InfoRow("PanVK driver", chosenDriver.label, chosenDriver.buildId.ifEmpty { chosenDriver.driverVersion })
+                        InfoRow(if (box) "Box64 mode" else "FEX mode", emuMode)
+                        InfoRow(audioInfo.label, audioInfo.name, audioInfo.version, subIsError = audioInfo.missing)
+                        InfoRow("Executable", info.exePath, info.arch)
+                        InfoRow("Detected API", detected?.text ?: "scanning…", detected?.suggested?.takeIf { it != RenderApi.AUTO }?.let { "suggests " + RenderApi.label(it).substringBefore(" (") } ?: "")
+                        if (game.lastApi.isNotEmpty()) InfoRow("Last run used", game.lastApi, "")
+                        // Controller assignment is set in the game's Edit sheet; its mapping can be edited from here.
+                        TextButton(onClick = { editCtl = true }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Edit controls…") }
+                    }
+                }
+            }
+            val choices: @Composable () -> Unit = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Change for this game", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                    ResolutionField("Resolution", resolution, { resolution = it }, defaultLabel = "Default ($defaultResolution)")
+                    FpsLimitField(fps) { fps = it }
+                    DropdownField(
+                        label = "PanVK driver",
+                        options = listOf("" to "Default (${activeDriver.label})") + drivers.map { it.id to it.label },
+                        selected = driverId,
+                        onSelect = { driverId = it }
+                    )
+                    DropdownField(
+                        label = "Render API",
+                        options = RenderApi.options,
+                        selected = renderApi,
+                        onSelect = { renderApi = it }
+                    )
+                    Text(
+                        "Detected: ${detected?.text ?: "scanning…"}" + if (game.lastApi.isNotEmpty()) ". Last run used: ${game.lastApi}." else ".",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (apiWarn != null) Text(apiWarn, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    DropdownField(
+                        label = "32-bit emulator",
+                        options = listOf("FEX" to "FEX (default)", "Box64" to "Box64"),
+                        selected = if (box) "Box64" else "FEX",
+                        onSelect = { fexMode = if (it == "Box64") Box64Presets.modes[0] else FexPresets.DEFAULT },
+                        enabled = is32
+                    )
+                    if (!is32) Text("Box64 is 32-bit only (WoW64).", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    DropdownField(
+                        label = if (box) "Box64 mode" else "FEX mode",
+                        options = (if (box) Box64Presets.modes else FexPresets.modes).map { it to it },
+                        selected = emuMode,
+                        onSelect = { fexMode = it }
+                    )
+                    Text(if (box) Box64Presets.hint(emuMode) else FexPresets.hint(emuMode), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    DropdownField(
+                        label = "Audio driver",
+                        options = listOf("" to "Default (${GameAudio.label(audioDefault)})") + GameAudio.drivers,
+                        selected = audio,
+                        onSelect = { audio = it }
+                    )
+                    if (audioInfo.missing) Text("${audioInfo.name} is not installed: the game runs without sound.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    if (problems.isNotEmpty()) {
+                        Column(
+                            modifier = Modifier.semantics(mergeDescendants = true) {},
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            problems.forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = 52.dp)) { Text("Cancel") }
+                        Button(
+                            onClick = { onLaunch(game.copy(resolution = resolution, driver = driverId, fex = emuMode, fpsLimit = fps, audio = audio, renderApi = renderApi)) },
+                            enabled = problems.isEmpty(),
+                            modifier = Modifier.weight(1f).heightIn(min = 52.dp)
+                        ) {
+                            Icon(Icons.Rounded.PlayArrow, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Launch", style = MaterialTheme.typography.titleMedium)
+                        }
+                    }
+                }
+            }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp)
+                    .navigationBarsPadding(),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                if (wide) {
+                    header()
+                    Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                        Column(Modifier.weight(1.15f)) { runtime() }
+                        Column(Modifier.weight(1f)) { choices() }
+                    }
+                } else {
+                    header(); runtime(); choices()
+                }
+                Spacer(Modifier.height(16.dp))
+            }
+        }
+    }
+}

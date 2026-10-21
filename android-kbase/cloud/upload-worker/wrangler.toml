@@ -1,0 +1,37 @@
+name = "panvk-upload"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# R2 needs a card; optional. Uncomment after creating the bucket:
+# [[r2_buckets]]
+# binding = "BUCKET"
+# bucket_name = "panvk-logs"
+
+[[kv_namespaces]]
+binding = "BLOBS"
+id = "dd69801f9dc24e639f04060c00e77ae2"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "panvk-uploads"
+database_id = "6a536808-0f63-48c3-956a-a7a592354e77"
+
+[vars]
+BUCKET_NAME = "panvk-logs"
+ACCOUNT_ID = "c21969dcea549f539aca8be12ac8e48e"
+DEV_DIRECT = "0"
+DAILY_RECORD_CAP = "2000"
+DAILY_BLOB_CAP = "900" # KV free tier: 1000 writes/day
+
+# Rate limiting binding
+# Note: Cloudflare rate limiting binding only supports periods of 10 or 60 seconds;
+# limit=2 with period=60 (2 requests/minute) approximates the ~10 requests/hour goal.
+[[ratelimits]]
+name = "UPLOAD_LIMIT"
+namespace_id = "1001"
+simple = { limit = 2, period = 60 }
+
+[[ratelimits]]
+name = "RECORD_LIMIT"
+namespace_id = "1002"
+simple = { limit = 10, period = 60 }

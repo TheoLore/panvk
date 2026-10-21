@@ -1,0 +1,13 @@
+{
+  "name": "Gamepad",
+  "output": "keyboard",
+  "bindings": {
+    "A": "gamepad", "B": "gamepad", "X": "gamepad", "Y": "gamepad",
+    "LB": "gamepad", "RB": "gamepad", "LT": "gamepad", "RT": "gamepad",
+    "BACK": "gamepad", "START": "gamepad", "GUIDE": "gamepad", "L3": "gamepad", "R3": "gamepad",
+    "DPAD_UP": "gamepad", "DPAD_DOWN": "gamepad", "DPAD_LEFT": "gamepad", "DPAD_RIGHT": "gamepad"
+  },
+  "labels": {},
+  "leftStick": { "mode": "gamepad", "deadzone": 0.3 },
+  "rightStick": { "mode": "gamepad", "sensitivity": 1.0, "deadzone": 0.12 }
+}
