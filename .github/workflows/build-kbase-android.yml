@@ -36,6 +36,7 @@ jobs:
             build-essential git python3 python3-pip python3-setuptools python3-mako \
             ninja-build pkg-config bison flex \
             llvm-dev clang libclang-dev \
+            libllvmspirvlib-18-dev \
             libdrm-dev libexpat1-dev \
             libxml2-dev libzstd-dev zlib1g-dev \
             libxcb1-dev libx11-dev libxext-dev libxdamage-dev libx11-xcb-dev \
@@ -49,6 +50,7 @@ jobs:
           meson --version
           ninja --version
           pkg-config --modversion libdrm
+          pkg-config --modversion LLVMSPIRVLib || true
 
       - name: Install Android NDK
         run: |
