@@ -1,9 +1,7 @@
 {
   "profile": "g52-v7-jm",
-  "gpu": "Mali-G52",
   "panArch": 7,
   "frontend": "JM",
   "kernelInterface": "mali_kbase",
-  "status": "experimental via universal g615-v11-csf (jm-v7 series included)",
-  "notes": "Device class Bifrost v7; same ICD binary as universal build selects JM at runtime from GPU id"
+  "status": "included in universal ICD build"
 }
