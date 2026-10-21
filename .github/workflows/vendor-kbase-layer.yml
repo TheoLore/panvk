@@ -1,0 +1,109 @@
+name: Vendor kbase layer into repo
+
+# One-shot (or re-run) import of the Android kbase patch/build layer into
+# android-kbase/ so builds do not clone a third-party repo at CI time.
+# Maintainer: TheoLore
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: Git URL of the kbase patch layer to vendor (public)
+        required: true
+        default: https://github.com/zenithblue-oss/panvk-kbase-android.git
+      source_ref:
+        description: Branch or tag to vendor
+        required: true
+        default: main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vendor-kbase
+  cancel-in-progress: false
+
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout panvk
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Clone source layer
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --branch "${{ inputs.source_ref }}" \
+            "${{ inputs.source_repo }}" /tmp/kbase-src
+          SRC_SHA=$(git -C /tmp/kbase-src rev-parse HEAD)
+          echo "SOURCE_SHA=$SRC_SHA" >> "$GITHUB_ENV"
+          echo "Vendoring $SRC_SHA from ${{ inputs.source_repo }}"
+
+      - name: Install into android-kbase/
+        run: |
+          set -euo pipefail
+          rm -rf android-kbase
+          mkdir -p android-kbase
+          # Copy layer tree (not .git)
+          rsync -a --exclude='.git' --exclude='work' --exclude='dist' \
+            /tmp/kbase-src/ android-kbase/
+          # Marker for provenance (technical, not branding in driver binary)
+          cat > android-kbase/VENDOR.md <<EOF
+          # android-kbase (vendored)
+
+          Local copy of the Android mali_kbase patch/build layer used by
+          this repository's CI.
+
+          - Maintainer account: TheoLore
+          - Driver identity string: PanLore (set at build via PANVK_KBASE_RELEASE)
+          - Source git: ${{ inputs.source_repo }}
+          - Source ref: ${{ inputs.source_ref }}
+          - Source commit: ${SOURCE_SHA}
+          - Vendored date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          Licenses of vendored headers and scripts remain as in upstream
+          files (see LICENSES/, NOTICE, and per-file headers). Do not strip
+          SPDX / copyright lines from UAPI or kmod sources.
+
+          Build with the workflow **Build kbase Android ICD**, which uses
+          only this directory (no network clone of the layer).
+          EOF
+          # Prefer TheoLore packaging names in local docs only; leave patch
+          # code untouched so apply-patches keeps working.
+          if [ -f android-kbase/README.md ]; then
+            {
+              echo "# PanLore Android kbase layer"
+              echo
+              echo "Maintainer: TheoLore"
+              echo
+              echo "This tree is the local kbase patch/build layer for"
+              echo "TheoLore/panvk. See VENDOR.md for provenance."
+              echo
+              echo "---"
+              echo
+              cat android-kbase/README.md
+            } > android-kbase/README.md.tmp
+            mv android-kbase/README.md.tmp android-kbase/README.md
+          fi
+          test -f android-kbase/sources.lock
+          test -d android-kbase/patches/kbase-common
+          test -d android-kbase/patches/jm-v7
+          test -x android-kbase/scripts/apply-patches.sh || chmod +x android-kbase/scripts/*.sh
+          find android-kbase/scripts -name '*.sh' -exec chmod +x {} +
+          echo "android-kbase file count: $(find android-kbase -type f | wc -l)"
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          git config user.name "TheoLore"
+          git config user.email "255962172+TheoLore@users.noreply.github.com"
+          git add android-kbase
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "vendor: import android-kbase layer (${SOURCE_SHA:0:12}) for local-only builds"
+          git push origin HEAD:main
