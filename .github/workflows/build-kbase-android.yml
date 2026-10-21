@@ -43,14 +43,13 @@ jobs:
             libxcb-glx0-dev libxcb-shm0-dev libxcb-dri2-0-dev libxcb-dri3-dev \
             libxcb-present-dev libxcb-sync-dev libxshmfence-dev libxxf86vm-dev \
             glslang-tools \
-            cmake curl unzip ca-certificates
+            cmake curl unzip ca-certificates zip
           pip3 install --user --break-system-packages 'meson>=1.3' || pip3 install --user 'meson>=1.3'
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.local/bin:$PATH"
           meson --version
           ninja --version
           pkg-config --modversion libdrm
-          pkg-config --modversion LLVMSPIRVLib || true
 
       - name: Install Android NDK
         run: |
@@ -103,7 +102,7 @@ jobs:
           ls -la "$SO"
           sha256sum "$SO"
 
-      - name: Package ICD + metadata
+      - name: Package ICD + launcher meta
         working-directory: kbase
         run: |
           set -euo pipefail
@@ -111,27 +110,81 @@ jobs:
           mkdir -p "$OUT"
           SO="dist/android-${{ inputs.profile }}/libvulkan_panfrost.so"
           cp "$SO" "$OUT/libvulkan_panfrost.so"
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-          p = Path("../artifact/panfrost_icd.aarch64.json")
-          p.write_text(json.dumps({
-            "file_format_version": "1.0.0",
-            "ICD": {
-              "library_path": "libvulkan_panfrost.so",
-              "api_version": "1.3",
-            },
+          MESA_SHA=$(git -C work/mesa rev-parse HEAD)
+          MESA_VER=$(cat work/mesa/VERSION)
+          KBASE_SHA=$(git rev-parse HEAD)
+          SO_SHA=$(sha256sum "$SO" | awk '{print $1}')
+          REL="${{ inputs.release_name }}"
+          PROFILE="${{ inputs.profile }}"
+          python3 - <<PY
+          import json, pathlib
+          out = pathlib.Path("../artifact")
+          mesa_sha = "${MESA_SHA}"
+          mesa_ver = "${MESA_VER}"
+          so_sha = "${SO_SHA}"
+          rel = "${REL}"
+          profile = "${PROFILE}"
+          kbase_sha = "${KBASE_SHA}"
+          # ICD (relative library path for package root)
+          (out / "panfrost_icd.aarch64.json").write_text(json.dumps({
+              "file_format_version": "1.0.0",
+              "ICD": {
+                  "library_path": "libvulkan_panfrost.so",
+                  "api_version": "1.3",
+              },
           }, indent=2) + "\n")
+          # Adrenotools-style meta.json
+          drv = f"{rel} (Mesa {mesa_ver} git-{mesa_sha[:10]})"
+          meta = {
+              "schemaVersion": 1,
+              "name": rel,
+              "description": (
+                  f"{rel}: Mesa PanVK via mali_kbase (profile {profile}). "
+                  "JM v7/v9 + CSF; opens /dev/mali0."
+              ),
+              "author": "TheoLore",
+              "packageVersion": "0.0.0-ci",
+              "vendor": "Mesa",
+              "driverVersion": drv,
+              "minApi": 29,
+              "libraryName": "libvulkan_panfrost.so",
+          }
+          (out / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+          (out / "SHA256SUMS.txt").write_text(f"{so_sha}  libvulkan_panfrost.so\n")
+          build = {
+              "profile": profile,
+              "driverInfo_release": rel,
+              "mesa": mesa_sha,
+              "mesa_version": mesa_ver,
+              "kbase_layer": kbase_sha,
+              "so_sha256": so_sha,
+              "android_api": 29,
+              "kmds": "kbase",
+              "notes": [
+                  "UAPI/kbase backend is compiled into libvulkan_panfrost.so",
+                  "Runtime needs /dev/mali0 + ICD load path; see docs/RUNTIME.md",
+              ],
+          }
+          (out / "BUILD.txt").write_text(
+              "\n".join(f"{k}={v}" if not isinstance(v, list) else f"{k}={json.dumps(v)}"
+                       for k, v in build.items()) + "\n"
+          )
+          # Simple adrenotools-style zip
+          import zipfile
+          zpath = out / f"{rel}-android-adrenotools.zip"
+          with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+              for name in (
+                  "libvulkan_panfrost.so",
+                  "meta.json",
+                  "panfrost_icd.aarch64.json",
+                  "SHA256SUMS.txt",
+                  "BUILD.txt",
+              ):
+                  z.write(out / name, name)
+          print("packaged", zpath)
           PY
-          {
-            echo "profile=${{ inputs.profile }}"
-            echo "driverInfo_release=${{ inputs.release_name }}"
-            echo "mesa=$(git -C work/mesa rev-parse HEAD)"
-            echo "mesa_version=$(cat work/mesa/VERSION)"
-            echo "kbase_layer=$(git rev-parse HEAD)"
-            echo "so_sha256=$(sha256sum "$SO" | awk '{print $1}')"
-          } > "$OUT/BUILD.txt"
           cat "$OUT/BUILD.txt"
+          ls -la "$OUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
