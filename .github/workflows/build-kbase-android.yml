@@ -1,0 +1,145 @@
+name: Build kbase Android ICD
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Patch profile (g615-v11-csf = universal ICD with jm-v7 + jm-v9)
+        required: true
+        default: g615-v11-csf
+      release_name:
+        description: String reported in driverInfo (PANVK_KBASE_RELEASE)
+        required: true
+        default: PanLore
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-kbase-android
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      PANVK_KBASE_RELEASE: ${{ inputs.release_name }}
+      ANDROID_API: "29"
+    steps:
+      - name: Install host packages
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential git python3 python3-pip python3-setuptools \
+            ninja-build pkg-config bison flex \
+            libllvm-18-dev llvm-18-dev clang-18 \
+            libclang-18-dev libclang-cpp18-dev \
+            libxml2-dev libzstd-dev zlib1g-dev \
+            cmake curl unzip
+          # Meson from pip for a recent enough version
+          pip3 install --user 'meson>=1.3'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          meson --version
+          ninja --version
+
+      - name: Install Android NDK
+        run: |
+          set -euo pipefail
+          # NDK r27c is widely available; zenithblue builds also succeed on r26–r30
+          NDK_ZIP=android-ndk-r27c-linux.zip
+          curl -fsSL -o /tmp/ndk.zip \
+            "https://dl.google.com/android/repository/${NDK_ZIP}"
+          sudo mkdir -p /opt/android-ndk
+          sudo unzip -q /tmp/ndk.zip -d /opt/android-ndk
+          NDK_ROOT=$(echo /opt/android-ndk/android-ndk-*)
+          echo "ANDROID_NDK_ROOT=$NDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=/opt/android-sdk" >> "$GITHUB_ENV"
+          ls "$NDK_ROOT/toolchains/llvm/prebuilt/"
+
+      - name: Clone kbase patch/build layer
+        run: |
+          set -euo pipefail
+          git clone --depth=1 https://github.com/zenithblue-oss/panvk-kbase-android.git kbase
+          cd kbase
+          git rev-parse HEAD
+          test -f sources.lock
+          test -x scripts/fetch-mesa.sh
+
+      - name: Fetch pinned Mesa
+        working-directory: kbase
+        run: |
+          set -euo pipefail
+          ./scripts/fetch-mesa.sh
+          echo "MESA_HEAD=$(git -C work/mesa rev-parse HEAD)"
+          echo "MESA_VERSION=$(cat work/mesa/VERSION)"
+
+      - name: Apply patch series
+        working-directory: kbase
+        run: |
+          set -euo pipefail
+          ./scripts/apply-patches.sh --profile "${{ inputs.profile }}"
+
+      - name: Build Android ICD (libvulkan_panfrost.so)
+        working-directory: kbase
+        run: |
+          set -euo pipefail
+          export ANDROID_NDK_ROOT
+          export PANVK_KBASE_RELEASE
+          export PANVK_JOBS="$(nproc)"
+          ./scripts/build-android.sh --profile "${{ inputs.profile }}" --api "$ANDROID_API" --ndk "$ANDROID_NDK_ROOT"
+          SO="dist/android-${{ inputs.profile }}/libvulkan_panfrost.so"
+          test -f "$SO"
+          file "$SO"
+          ls -la "$SO"
+          sha256sum "$SO"
+
+      - name: Package ICD + metadata
+        working-directory: kbase
+        run: |
+          set -euo pipefail
+          OUT=../artifact
+          mkdir -p "$OUT"
+          SO="dist/android-${{ inputs.profile }}/libvulkan_panfrost.so"
+          cp "$SO" "$OUT/libvulkan_panfrost.so"
+          cat > "$OUT/panfrost_icd.aarch64.json" <<'EOF'
+          {
+            "file_format_version": "1.0.0",
+            "ICD": {
+              "library_path": "libvulkan_panfrost.so",
+              "api_version": "1.3"
+            }
+          }
+          EOF
+          # Fix indentation (heredoc above may keep leading spaces)
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("../artifact/panfrost_icd.aarch64.json")
+          p.write_text(json.dumps({
+            "file_format_version": "1.0.0",
+            "ICD": {
+              "library_path": "libvulkan_panfrost.so",
+              "api_version": "1.3",
+            },
+          }, indent=2) + "\n")
+          PY
+          {
+            echo "profile=${{ inputs.profile }}"
+            echo "driverInfo_release=${{ inputs.release_name }}"
+            echo "mesa=$(git -C work/mesa rev-parse HEAD)"
+            echo "mesa_version=$(cat work/mesa/VERSION)"
+            echo "kbase_layer=$(git rev-parse HEAD)"
+            echo "so_sha256=$(sha256sum "$SO" | awk '{print $1}')"
+          } > "$OUT/BUILD.txt"
+          cat "$OUT/BUILD.txt"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: panlore-kbase-${{ inputs.profile }}
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
