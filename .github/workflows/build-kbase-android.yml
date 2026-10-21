@@ -1,18 +1,14 @@
 name: Build kbase Android ICD
 
-# Builds libvulkan_panfrost.so from the in-repo android-kbase/ tree only.
-# Does not clone third-party layer repos at build time.
-# Maintainer: TheoLore · driverInfo: PanLore
-
 on:
   workflow_dispatch:
     inputs:
       profile:
-        description: Patch profile (g615-v11-csf = universal ICD with jm-v7 + jm-v9)
+        description: Patch profile (g615-v11-csf includes jm-v7 + jm-v9 + CSF)
         required: true
         default: g615-v11-csf
       release_name:
-        description: String reported in driverInfo (PANVK_KBASE_RELEASE)
+        description: driverInfo string
         required: true
         default: PanLore
 
@@ -32,82 +28,53 @@ jobs:
       PANVK_KBASE_RELEASE: ${{ inputs.release_name }}
       ANDROID_API: "29"
     steps:
-      - name: Checkout (with android-kbase)
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Require vendored layer
+      - name: Require android-kbase
         run: |
           set -euo pipefail
-          test -d android-kbase
-          test -f android-kbase/sources.lock
           test -d android-kbase/patches/kbase-common
           test -d android-kbase/patches/jm-v7
-          test -x android-kbase/scripts/fetch-mesa.sh || chmod +x android-kbase/scripts/*.sh
-          find android-kbase/scripts -name '*.sh' -exec chmod +x {} +
-          echo "Using in-repo android-kbase only"
-          head -n 20 android-kbase/VENDOR.md || true
+          chmod +x android-kbase/scripts/*.sh
 
-      - name: Install host packages
+      - name: Host packages
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential git python3 python3-pip python3-setuptools python3-mako \
             ninja-build pkg-config bison flex \
-            llvm-dev clang libclang-dev \
-            libllvmspirvlib-18-dev \
-            libdrm-dev libexpat1-dev \
-            libxml2-dev libzstd-dev zlib1g-dev \
+            llvm-dev clang libclang-dev libllvmspirvlib-18-dev \
+            libdrm-dev libexpat1-dev libxml2-dev libzstd-dev zlib1g-dev \
             libxcb1-dev libx11-dev libxext-dev libxdamage-dev libx11-xcb-dev \
             libxcb-glx0-dev libxcb-shm0-dev libxcb-dri2-0-dev libxcb-dri3-dev \
             libxcb-present-dev libxcb-sync-dev libxshmfence-dev libxxf86vm-dev \
-            glslang-tools \
-            cmake curl unzip ca-certificates zip rsync
+            glslang-tools cmake curl unzip ca-certificates zip
           pip3 install --user --break-system-packages 'meson>=1.3' || pip3 install --user 'meson>=1.3'
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.local/bin:$PATH"
-          meson --version
 
-      - name: Install Android NDK
+      - name: Android NDK
         run: |
           set -euo pipefail
-          NDK_ZIP=android-ndk-r27c-linux.zip
           curl -fsSL -o /tmp/ndk.zip \
-            "https://dl.google.com/android/repository/${NDK_ZIP}"
+            https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
           sudo mkdir -p /opt/android-ndk
           sudo unzip -q /tmp/ndk.zip -d /opt/android-ndk
-          NDK_ROOT=$(echo /opt/android-ndk/android-ndk-*)
-          echo "ANDROID_NDK_ROOT=$NDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$(echo /opt/android-ndk/android-ndk-*)" >> "$GITHUB_ENV"
 
-      - name: Fetch pinned Mesa (into android-kbase/work)
+      - name: Fetch Mesa + apply + build
         working-directory: android-kbase
         run: |
           set -euo pipefail
-          ./scripts/fetch-mesa.sh
-          echo "MESA_HEAD=$(git -C work/mesa rev-parse HEAD)"
-          echo "MESA_VERSION=$(cat work/mesa/VERSION)"
-
-      - name: Apply patch series
-        working-directory: android-kbase
-        run: |
-          set -euo pipefail
-          ./scripts/apply-patches.sh --profile "${{ inputs.profile }}"
-
-      - name: Build Android ICD
-        working-directory: android-kbase
-        run: |
-          set -euo pipefail
-          export ANDROID_NDK_ROOT
-          export PANVK_KBASE_RELEASE
-          export PANVK_JOBS="$(nproc)"
           export PATH="$HOME/.local/bin:$PATH"
+          export ANDROID_NDK_ROOT PANVK_KBASE_RELEASE
+          export PANVK_JOBS="$(nproc)"
+          ./scripts/fetch-mesa.sh
+          ./scripts/apply-patches.sh --profile "${{ inputs.profile }}"
           ./scripts/build-android.sh --profile "${{ inputs.profile }}" --api "$ANDROID_API" --ndk "$ANDROID_NDK_ROOT"
-          SO="dist/android-${{ inputs.profile }}/libvulkan_panfrost.so"
-          test -f "$SO"
-          file "$SO"
-          sha256sum "$SO"
+          test -f "dist/android-${{ inputs.profile }}/libvulkan_panfrost.so"
 
-      - name: Package ICD + launcher meta
+      - name: Multi-launcher packages
         working-directory: android-kbase
         run: |
           set -euo pipefail
@@ -120,20 +87,30 @@ jobs:
           SO_SHA=$(sha256sum "$SO" | awk '{print $1}')
           REL="${{ inputs.release_name }}"
           PROFILE="${{ inputs.profile }}"
-          LAYER_NOTE=$(test -f VENDOR.md && head -5 VENDOR.md | tr '\n' ' ' || echo local)
-          python3 - <<PY
-          import json, pathlib, zipfile
+          python3 - <<'PY'
+          import json, pathlib, zipfile, os, hashlib
           out = pathlib.Path("../artifact")
-          mesa_sha, mesa_ver, so_sha = "${MESA_SHA}", "${MESA_VER}", "${SO_SHA}"
-          rel, profile = "${REL}", "${PROFILE}"
-          (out / "panfrost_icd.aarch64.json").write_text(json.dumps({
-              "file_format_version": "1.0.0",
-              "ICD": {"library_path": "libvulkan_panfrost.so", "api_version": "1.3"},
-          }, indent=2) + "\n")
+          so_path = pathlib.Path(os.environ.get("SO_PATH", "dist/android-g615-v11-csf/libvulkan_panfrost.so"))
+          # paths from shell
+          PY
+          python3 - "$SO" "$OUT" "$MESA_SHA" "$MESA_VER" "$SO_SHA" "$REL" "$PROFILE" <<'PY'
+          import json, pathlib, zipfile, sys
+          so, out, mesa_sha, mesa_ver, so_sha, rel, profile = sys.argv[1:]
+          out = pathlib.Path(out)
+          data = pathlib.Path(so).read_bytes()
+
+          def write_icd(path, lib="libvulkan_panfrost.so"):
+              return json.dumps({
+                  "file_format_version": "1.0.0",
+                  "ICD": {"library_path": path, "api_version": "1.3"},
+              }, indent=2) + "\n"
+
+          (out / "panfrost_icd.aarch64.json").write_text(
+              write_icd("libvulkan_panfrost.so"))
           meta = {
               "schemaVersion": 1,
               "name": rel,
-              "description": f"{rel}: Mesa PanVK via mali_kbase (profile {profile}). Local android-kbase tree.",
+              "description": f"{rel} Mali kbase ICD profile={profile}",
               "author": "TheoLore",
               "packageVersion": "0.0.0-ci",
               "vendor": "Mesa",
@@ -144,20 +121,56 @@ jobs:
           (out / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
           (out / "SHA256SUMS.txt").write_text(f"{so_sha}  libvulkan_panfrost.so\n")
           (out / "BUILD.txt").write_text(
-              f"profile={profile}\ndriverInfo_release={rel}\nmesa={mesa_sha}\n"
-              f"mesa_version={mesa_ver}\nso_sha256={so_sha}\nandroid_api=29\n"
-              f"kmds=kbase\nsource=android-kbase (in-repo)\n"
+              f"profile={profile}\nrelease={rel}\nmesa={mesa_sha}\nmesa_version={mesa_ver}\n"
+              f"so_sha256={so_sha}\napi=29\nkmds=kbase\n"
+              f"series=common,android,kbase-common,app-loader,wsi,csf,jm-v9,jm-v7\n"
           )
-          zpath = out / f"{rel}-android-adrenotools.zip"
-          with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
-              for name in ("libvulkan_panfrost.so", "meta.json",
-                           "panfrost_icd.aarch64.json", "SHA256SUMS.txt", "BUILD.txt"):
-                  z.write(out / name, name)
-          print("OK", zpath)
+
+          def zip_write(zpath, files):
+              with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+                  for name, content in files.items():
+                      if isinstance(content, pathlib.Path):
+                          z.write(content, name)
+                      else:
+                          z.writestr(name, content)
+
+          # 1) adrenotools / generic
+          zip_write(out / f"{rel}-adrenotools.zip", {
+              "libvulkan_panfrost.so": pathlib.Path(so),
+              "meta.json": (out / "meta.json").read_bytes(),
+              "panfrost_icd.aarch64.json": (out / "panfrost_icd.aarch64.json").read_bytes(),
+              "SHA256SUMS.txt": (out / "SHA256SUMS.txt").read_bytes(),
+          })
+
+          # 2) GameHub-style renamed lib
+          zip_write(out / f"{rel}-gamehub.zip", {
+              "libvulkan_freedreno.so": pathlib.Path(so),
+              "meta.json": (out / "meta.json").read_bytes(),
+          })
+
+          # 3) Minecraft Java Android / Copper-style: arm64-v8a layout
+          # Put ICD next to lib; launcher sets VK_ICD_FILENAMES to extracted path.
+          zip_write(out / f"{rel}-minecraft-arm64-v8a.zip", {
+              "arm64-v8a/libvulkan_panfrost.so": pathlib.Path(so),
+              "arm64-v8a/panfrost_icd.aarch64.json": write_icd(
+                  "./libvulkan_panfrost.so").encode(),
+              "meta.json": (out / "meta.json").read_bytes(),
+              "SHA256SUMS.txt": (out / "SHA256SUMS.txt").read_bytes(),
+          })
+
+          # 4) Flat ICD package (Winlator-like direct)
+          zip_write(out / f"{rel}-icd-flat.zip", {
+              "libvulkan_panfrost.so": pathlib.Path(so),
+              "panfrost_icd.aarch64.json": write_icd(
+                  "./libvulkan_panfrost.so").encode(),
+          })
+
+          print("packages ready")
+          for p in sorted(out.glob("*.zip")):
+              print(p.name, p.stat().st_size)
           PY
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: panlore-kbase-${{ inputs.profile }}
           path: artifact/

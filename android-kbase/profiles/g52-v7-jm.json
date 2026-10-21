@@ -4,6 +4,6 @@
   "panArch": 7,
   "frontend": "JM",
   "kernelInterface": "mali_kbase",
-  "reference": "https://github.com/LukeValen/panvk-mali-g52",
-  "status": "planned P25 (reference: compute+offscreen+X11, output-semaphore fix, Android WSI/AHB groundwork)"
+  "status": "experimental via universal g615-v11-csf (jm-v7 series included)",
+  "notes": "Device class Bifrost v7; same ICD binary as universal build selects JM at runtime from GPU id"
 }
